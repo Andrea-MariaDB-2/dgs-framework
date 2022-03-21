@@ -1,5 +1,5 @@
 /*
- * Copyright 2021 Netflix, Inc.
+ * Copyright 2022 Netflix, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -35,8 +35,10 @@ import org.springframework.web.bind.annotation.CookieValue
 import org.springframework.web.bind.annotation.RequestHeader
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.ValueConstants
+import java.lang.reflect.InvocationTargetException
 import java.lang.reflect.Method
 import java.lang.reflect.Parameter
+import java.lang.reflect.ParameterizedType
 import java.util.*
 import kotlin.coroutines.Continuation
 import kotlin.reflect.full.callSuspend
@@ -47,10 +49,10 @@ class DataFetcherInvoker(
     defaultParameterNameDiscoverer: DefaultParameterNameDiscoverer,
     private val environment: DataFetchingEnvironment,
     private val dgsComponent: Any,
-    private val method: Method
+    private val method: Method,
+    private val inputObjectMapper: InputObjectMapper,
 ) {
 
-    private val logger = LoggerFactory.getLogger(DataFetcherInvoker::class.java)
     private val parameterNames = defaultParameterNameDiscoverer.getParameterNames(method) ?: emptyArray()
 
     fun invokeDataFetcher(): Any? {
@@ -96,7 +98,7 @@ class DataFetcherInvoker(
                     args.add(environment)
                 }
                 else -> {
-                    logger.warn("Unknown argument '${parameterNames[idx]}' on data fetcher ${dgsComponent.javaClass.name}.${method.name}")
+                    logger.debug("Unknown argument '${parameterNames[idx]}' on data fetcher ${dgsComponent.javaClass.name}.${method.name}")
                     // This might cause an exception, but parameter's the best effort we can do
                     args.add(null)
                 }
@@ -106,11 +108,16 @@ class DataFetcherInvoker(
         return if (method.kotlinFunction?.isSuspend == true) {
 
             val launch = CoroutineScope(Dispatchers.Unconfined).async {
-                return@async method.kotlinFunction!!.callSuspend(dgsComponent, *args.toTypedArray())
+                try {
+                    method.kotlinFunction!!.callSuspend(dgsComponent, *args.toTypedArray())
+                } catch (exception: InvocationTargetException) {
+                    throw exception.cause ?: exception
+                }
             }
 
             launch.asCompletableFuture()
         } else {
+            ReflectionUtils.makeAccessible(method)
             ReflectionUtils.invokeMethod(method, dgsComponent, *args.toTypedArray())
         }
     }
@@ -190,22 +197,23 @@ class DataFetcherInvoker(
         val collectionType = annotation.collectionType.java
         val parameterValue: Any? = environment.getArgument(parameterName)
 
-        val convertValue: Any? = if (parameterValue is List<*> && collectionType != Object::class.java) {
-            try {
-                // Return a list of elements that are converted to their collection type, e.e.g. List<Person>, List<String> etc.
-                parameterValue.map { item -> convertValue(item, parameter, collectionType) }.toList()
-            } catch (ex: Exception) {
-                throw DgsInvalidInputArgumentException(
-                    "Specified type '$collectionType' is invalid for $parameterName.",
-                    ex
-                )
+        val convertValue: Any? =
+            if (parameterValue is List<*> && collectionType != Object::class.java) {
+                try {
+                    // Return a list of elements that are converted to their collection type, e.e.g. List<Person>, List<String> etc.
+                    parameterValue.map { item -> convertValue(item, parameter, collectionType) }.toList()
+                } catch (ex: Exception) {
+                    throw DgsInvalidInputArgumentException(
+                        "Specified type '$collectionType' is invalid for $parameterName.",
+                        ex
+                    )
+                }
+            } else if (parameterValue is Map<*, *> && parameter.type.isAssignableFrom(Map::class.java)) {
+                parameterValue
+            } else {
+                // Return the converted value mapped to the defined type
+                convertValue(parameterValue, parameter, collectionType)
             }
-        } else if (parameterValue is Map<*, *> && parameter.type.isAssignableFrom(Map::class.java)) {
-            parameterValue
-        } else {
-            // Return the converted value mapped to the defined type
-            convertValue(parameterValue, parameter, collectionType)
-        }
 
         val paramType = parameter.type
         val optionalValue = getValueAsOptional(convertValue, parameter)
@@ -224,26 +232,53 @@ class DataFetcherInvoker(
     private fun convertValue(parameterValue: Any?, parameter: Parameter, collectionType: Class<out Any>?) =
         if (parameterValue is Map<*, *>) {
             // Account for Optional
-            val targetType = if (parameter.type.isAssignableFrom(Optional::class.java) || parameter.type.isAssignableFrom(List::class.java) || parameter.type.isAssignableFrom(Set::class.java)) {
-                if (collectionType != null && collectionType != Object::class.java) {
-                    collectionType
+            val targetType =
+                if (parameter.type.isAssignableFrom(Optional::class.java) ||
+                    parameter.type.isAssignableFrom(List::class.java) ||
+                    parameter.type.isAssignableFrom(Set::class.java)
+                ) {
+                    if (collectionType != null && collectionType != Object::class.java) {
+                        collectionType
+                    } else {
+                        throw DgsInvalidInputArgumentException("When ${parameter.type.simpleName}<T> is used, the type must be specified using the collectionType argument of the @InputArgument annotation.")
+                    }
                 } else {
-                    throw DgsInvalidInputArgumentException("When ${parameter.type.simpleName}<T> is used, the type must be specified using the collectionType argument of the @InputArgument annotation.")
+                    parameter.type
                 }
-            } else {
-                parameter.type
-            }
 
             if (targetType.isKotlinClass()) {
-                InputObjectMapper.mapToKotlinObject(parameterValue as Map<String, *>, targetType.kotlin)
+                inputObjectMapper.mapToKotlinObject(parameterValue as Map<String, *>, targetType.kotlin)
             } else {
-                InputObjectMapper.mapToJavaObject(parameterValue as Map<String, *>, targetType)
+                inputObjectMapper.mapToJavaObject(parameterValue as Map<String, *>, targetType)
             }
-        } else if (parameter.type.isEnum && parameterValue !== null) {
-            (parameter.type.enumConstants as Array<Enum<*>>).find { it.name == parameterValue }
+        } else if ((parameter.type.isEnum || collectionType?.isEnum == true) && parameterValue != null) {
+            val enumConstants: Array<Enum<*>> =
+                if (parameter.type.isEnum) {
+                    parameter.type.enumConstants as Array<Enum<*>>
+                } else {
+                    collectionType?.enumConstants as Array<Enum<*>>
+                }
+
+            enumConstants.find { it.name == parameterValue }
                 ?: throw DgsInvalidInputArgumentException("Invalid enum value '$parameterValue for enum type ${parameter.type.name}")
+        } else if (parameter.type == Optional::class.java) {
+            val targetType: Class<*> = if (collectionType != Object::class.java) {
+                collectionType!!
+            } else {
+                (parameter.parameterizedType as ParameterizedType).actualTypeArguments[0] as Class<*>
+            }
+
+            if (targetType.isEnum) {
+                (targetType.enumConstants as Array<Enum<*>>).find { it.name == parameterValue }
+            } else {
+                parameterValue
+            }
         } else {
-            parameterValue
+            if (parameterValue is List<*> && parameter.type == Set::class.java) {
+                parameterValue.toSet()
+            } else {
+                parameterValue
+            }
         }
 
     private fun getValueAsOptional(value: Any?, parameter: Parameter) =
@@ -252,4 +287,8 @@ class DataFetcherInvoker(
         } else {
             value
         }
+
+    companion object {
+        private val logger = LoggerFactory.getLogger(DataFetcherInvoker::class.java)
+    }
 }

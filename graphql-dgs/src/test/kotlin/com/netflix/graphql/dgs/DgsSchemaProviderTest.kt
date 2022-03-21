@@ -18,6 +18,8 @@ package com.netflix.graphql.dgs
 
 import com.netflix.graphql.dgs.exceptions.NoSchemaFoundException
 import com.netflix.graphql.dgs.internal.DgsSchemaProvider
+import com.netflix.graphql.dgs.internal.kotlin.test.Show
+import com.netflix.graphql.dgs.internal.kotlin.test.Video
 import graphql.ExecutionResult
 import graphql.GraphQL
 import graphql.language.FieldDefinition
@@ -32,7 +34,6 @@ import io.mockk.every
 import io.mockk.impl.annotations.MockK
 import io.mockk.junit5.MockKExtension
 import io.mockk.verify
-// import io.reactivex.rxjava3.subscribers.TestSubscriber
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
@@ -43,7 +44,6 @@ import org.reactivestreams.Publisher
 import org.springframework.context.ApplicationContext
 import reactor.core.publisher.Flux
 import reactor.test.StepVerifier
-import java.time.LocalDateTime
 import java.util.*
 import java.util.concurrent.CompletableFuture
 
@@ -151,6 +151,62 @@ internal class DgsSchemaProviderTest {
             fun someFetcher(dfe: DataFetchingEnvironment): String {
                 return "Hello"
             }
+        }
+
+        every { applicationContextMock.getBeansWithAnnotation(DgsComponent::class.java) } returns mapOf(
+            Pair(
+                "helloFetcher",
+                fetcher
+            )
+        )
+        every { applicationContextMock.getBeansWithAnnotation(DgsScalar::class.java) } returns emptyMap()
+        every { applicationContextMock.getBeansWithAnnotation(DgsDirective::class.java) } returns emptyMap()
+
+        val provider = DgsSchemaProvider(applicationContextMock, Optional.empty(), Optional.empty(), Optional.empty())
+        val schema = provider.schema()
+        val build = GraphQL.newGraphQL(schema).build()
+        assertHello(build)
+
+        verify { applicationContextMock.getBeansWithAnnotation(DgsComponent::class.java) }
+    }
+
+    @Test
+    fun addPrivateFetchers() {
+        val fetcher = object : Any() {
+            @DgsData(parentType = "Query", field = "hello")
+            private fun someFetcher(dfe: DataFetchingEnvironment): String {
+                return "Hello"
+            }
+        }
+
+        every { applicationContextMock.getBeansWithAnnotation(DgsComponent::class.java) } returns mapOf(
+            Pair(
+                "helloFetcher",
+                fetcher
+            )
+        )
+        every { applicationContextMock.getBeansWithAnnotation(DgsScalar::class.java) } returns emptyMap()
+        every { applicationContextMock.getBeansWithAnnotation(DgsDirective::class.java) } returns emptyMap()
+
+        val provider = DgsSchemaProvider(applicationContextMock, Optional.empty(), Optional.empty(), Optional.empty())
+        val schema = provider.schema()
+        val build = GraphQL.newGraphQL(schema).build()
+        assertHello(build)
+
+        verify { applicationContextMock.getBeansWithAnnotation(DgsComponent::class.java) }
+    }
+
+    open class BaseClassFetcher {
+        @DgsData(parentType = "Query", field = "hello")
+        private fun someFetcher(dfe: DataFetchingEnvironment): String {
+            return "Hello"
+        }
+    }
+
+    @Test
+    fun addSubClassFetchers() {
+        val fetcher = object : BaseClassFetcher() {
+            // We're only interested in the base class for this test
         }
 
         every { applicationContextMock.getBeansWithAnnotation(DgsComponent::class.java) } returns mapOf(
@@ -841,11 +897,3 @@ internal class DgsSchemaProviderTest {
         assertEquals("hello", data["addMessage"])
     }
 }
-
-interface Video {
-    val title: String
-}
-
-data class Show(override val title: String) : Video
-data class Person(val name: String)
-data class DateTimeInput(val date: LocalDateTime)

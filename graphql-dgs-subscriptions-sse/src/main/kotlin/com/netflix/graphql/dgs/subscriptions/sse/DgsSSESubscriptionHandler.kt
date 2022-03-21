@@ -16,15 +16,17 @@
 
 package com.netflix.graphql.dgs.subscriptions.sse
 
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.netflix.graphql.dgs.DgsQueryExecutor
+import com.netflix.graphql.types.subscription.QueryPayload
+import com.netflix.graphql.types.subscription.SSEDataPayload
 import graphql.ExecutionResult
-import graphql.GraphQLError
+import graphql.InvalidSyntaxError
 import graphql.validation.ValidationError
 import org.reactivestreams.Publisher
 import org.reactivestreams.Subscriber
 import org.reactivestreams.Subscription
+import org.slf4j.Logger
 import org.slf4j.LoggerFactory
 import org.springframework.http.MediaType
 import org.springframework.http.ResponseEntity
@@ -41,8 +43,6 @@ import java.util.*
  */
 @RestController
 open class DgsSSESubscriptionHandler(open val dgsQueryExecutor: DgsQueryExecutor) {
-    open val logger = LoggerFactory.getLogger(DgsSSESubscriptionHandler::class.java)
-    private val mapper = jacksonObjectMapper()
 
     @RequestMapping("/subscriptions", produces = ["text/event-stream"])
     fun subscriptionWithId(@RequestParam("query") queryBase64: String): ResponseEntity<SseEmitter> {
@@ -66,7 +66,10 @@ open class DgsSSESubscriptionHandler(open val dgsQueryExecutor: DgsQueryExecutor
 
         val executionResult: ExecutionResult = dgsQueryExecutor.execute(queryPayload.query, queryPayload.variables)
         if (executionResult.errors.isNotEmpty()) {
-            return if (executionResult.errors.asSequence().filterIsInstance<ValidationError>().any()) {
+            return if (
+                executionResult.errors.asSequence().filterIsInstance<ValidationError>().any() ||
+                executionResult.errors.asSequence().filterIsInstance<InvalidSyntaxError>().any()
+            ) {
                 val errorMessage = "Subscription query failed to validate: ${executionResult.errors.joinToString(", ")}"
                 emitter.send(errorMessage)
                 emitter.complete()
@@ -90,10 +93,13 @@ open class DgsSSESubscriptionHandler(open val dgsQueryExecutor: DgsQueryExecutor
             }
 
             override fun onNext(t: ExecutionResult) {
-
                 val event = SseEmitter.event()
-                    .data(mapper.writeValueAsString(SubscriptionData(t.getData(), t.errors, sessionId)), MediaType.APPLICATION_JSON)
-                    .id(UUID.randomUUID().toString())
+                    .data(
+                        mapper.writeValueAsString(
+                            SSEDataPayload(data = t.getData(), errors = t.errors, subId = sessionId)
+                        ),
+                        MediaType.APPLICATION_JSON
+                    ).id(UUID.randomUUID().toString())
                 emitter.send(event)
 
                 subscription.request(1)
@@ -101,6 +107,19 @@ open class DgsSSESubscriptionHandler(open val dgsQueryExecutor: DgsQueryExecutor
 
             override fun onError(t: Throwable) {
                 logger.error("Error on subscription {}", sessionId, t)
+                val event = SseEmitter.event()
+                    .data(
+                        mapper.writeValueAsString(
+                            SSEDataPayload(
+                                data = null,
+                                errors = listOf(Error(t.message)),
+                                subId = sessionId
+                            )
+                        ),
+                        MediaType.APPLICATION_JSON
+                    )
+
+                emitter.send(event)
                 emitter.completeWithError(t)
             }
 
@@ -140,6 +159,8 @@ open class DgsSSESubscriptionHandler(open val dgsQueryExecutor: DgsQueryExecutor
         return ResponseEntity.ok(emitter)
     }
 
-    data class QueryPayload(@JsonProperty("variables") val variables: Map<String, Any> = emptyMap(), @JsonProperty("extensions") val extensions: Map<String, Any> = emptyMap(), @JsonProperty("operationName") val operationName: String?, @JsonProperty("query") val query: String)
-    data class SubscriptionData(val data: Any, val errors: List<GraphQLError>? = null, val subId: String, val type: String = "SUBSCRIPTION_DATA")
+    companion object {
+        private val mapper = jacksonObjectMapper()
+        private val logger: Logger = LoggerFactory.getLogger(DgsSSESubscriptionHandler::class.java)
+    }
 }

@@ -38,7 +38,14 @@ import reactor.core.publisher.Mono
 
 @AutoConfigureWebTestClient
 @EnableWebFlux
-@SpringBootTest(classes = [DgsWebFluxAutoConfiguration::class, DgsAutoConfiguration::class, WebRequestTestWithCustomContext.ExampleImplementation::class, WebRequestTestWithCustomContext.MyContextBuilder::class])
+@SpringBootTest(
+    classes = [
+        DgsWebFluxAutoConfiguration::class,
+        DgsAutoConfiguration::class,
+        WebRequestTestWithCustomContext.ExampleImplementation::class,
+        WebRequestTestWithCustomContext.MyContextBuilder::class
+    ]
+)
 class WebRequestTestWithCustomContext {
     @Autowired
     lateinit var webTestClient: WebTestClient
@@ -100,7 +107,6 @@ class WebRequestTestWithCustomContext {
                             .type(TypeName("String"))
                             .build()
                     )
-
                     .build()
             newRegistry.add(query)
 

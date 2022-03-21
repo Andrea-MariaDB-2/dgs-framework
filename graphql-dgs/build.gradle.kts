@@ -27,10 +27,12 @@ dependencies {
     implementation("org.springframework:spring-web")
     implementation("org.springframework:spring-context")
 
+    compileOnly("org.springframework.security:spring-security-core")
+    compileOnly("io.projectreactor:reactor-core")
+
     implementation("com.fasterxml.jackson.module:jackson-module-kotlin")
     implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
     implementation("com.apollographql.federation:federation-graphql-java-support")
-    implementation("org.springframework.security:spring-security-core")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-jdk8")
 
@@ -38,4 +40,5 @@ dependencies {
     testImplementation("io.projectreactor:reactor-core")
     testImplementation("io.projectreactor:reactor-test")
     testImplementation("com.graphql-java:graphql-java-extended-scalars")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test")
 }

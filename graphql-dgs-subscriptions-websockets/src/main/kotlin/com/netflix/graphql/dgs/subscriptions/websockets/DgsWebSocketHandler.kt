@@ -16,14 +16,18 @@
 
 package com.netflix.graphql.dgs.subscriptions.websockets
 
-import com.fasterxml.jackson.annotation.JsonProperty
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.netflix.graphql.dgs.DgsQueryExecutor
+import com.netflix.graphql.types.subscription.*
 import graphql.ExecutionResult
 import org.reactivestreams.Publisher
 import org.reactivestreams.Subscriber
 import org.reactivestreams.Subscription
 import org.slf4j.LoggerFactory
+import org.springframework.security.core.context.SecurityContext
+import org.springframework.security.core.context.SecurityContextHolder
+import org.springframework.util.ClassUtils
+import org.springframework.web.socket.SubProtocolCapable
 import org.springframework.web.socket.TextMessage
 import org.springframework.web.socket.WebSocketSession
 import org.springframework.web.socket.handler.TextWebSocketHandler
@@ -32,9 +36,8 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import javax.annotation.PostConstruct
 
-class DgsWebSocketHandler(private val dgsQueryExecutor: DgsQueryExecutor) : TextWebSocketHandler() {
-    private val logger = LoggerFactory.getLogger(DgsWebSocketHandler::class.java)
-    private val objectMapper = jacksonObjectMapper()
+class DgsWebSocketHandler(private val dgsQueryExecutor: DgsQueryExecutor) : TextWebSocketHandler(), SubProtocolCapable {
+
     internal val subscriptions = ConcurrentHashMap<String, MutableMap<String, Subscription>>()
     internal val sessions = CopyOnWriteArrayList<WebSocketSession>()
 
@@ -52,6 +55,7 @@ class DgsWebSocketHandler(private val dgsQueryExecutor: DgsQueryExecutor) : Text
 
     public override fun handleTextMessage(session: WebSocketSession, message: TextMessage) {
         val (type, payload, id) = objectMapper.readValue(message.payload, OperationMessage::class.java)
+        loadSecurityContextFromSession(session)
         when (type) {
             GQL_CONNECTION_INIT -> {
                 logger.info("Initialized connection for {}", session.id)
@@ -81,6 +85,15 @@ class DgsWebSocketHandler(private val dgsQueryExecutor: DgsQueryExecutor) : Text
                 session.close()
             }
             else -> session.sendMessage(TextMessage(objectMapper.writeValueAsBytes(OperationMessage("error"))))
+        }
+    }
+
+    private fun loadSecurityContextFromSession(session: WebSocketSession) {
+        if (springSecurityAvailable) {
+            val securityContext = session.attributes["SPRING_SECURITY_CONTEXT"] as? SecurityContext
+            if (securityContext != null) {
+                SecurityContextHolder.setContext(securityContext)
+            }
         }
     }
 
@@ -128,7 +141,7 @@ class DgsWebSocketHandler(private val dgsQueryExecutor: DgsQueryExecutor) : Text
 
             override fun onComplete() {
                 logger.info("Subscription completed for {}", id)
-                val message = OperationMessage(GQL_TYPE, null, id)
+                val message = OperationMessage(GQL_COMPLETE, null, id)
                 val jsonMessage = TextMessage(objectMapper.writeValueAsBytes(message))
 
                 if (session.isOpen) {
@@ -139,17 +152,18 @@ class DgsWebSocketHandler(private val dgsQueryExecutor: DgsQueryExecutor) : Text
             }
         })
     }
+
+    private companion object {
+        val logger = LoggerFactory.getLogger(DgsWebSocketHandler::class.java)
+        val objectMapper = jacksonObjectMapper()
+
+        private val springSecurityAvailable: Boolean by lazy {
+            ClassUtils.isPresent(
+                "org.springframework.security.core.context.SecurityContextHolder",
+                DgsWebSocketHandler::class.java.classLoader
+            )
+        }
+    }
+
+    override fun getSubProtocols(): List<String> = listOf(GRAPHQL_SUBSCRIPTIONS_WS_PROTOCOL)
 }
-
-const val GQL_CONNECTION_INIT = "connection_init"
-const val GQL_CONNECTION_ACK = "connection_ack"
-const val GQL_START = "start"
-const val GQL_STOP = "stop"
-const val GQL_DATA = "data"
-const val GQL_ERROR = "error"
-const val GQL_TYPE = "complete"
-const val GQL_CONNECTION_TERMINATE = "connection_terminate"
-
-data class DataPayload(val data: Any?, val errors: List<Any>? = emptyList())
-data class OperationMessage(@JsonProperty("type") val type: String, @JsonProperty("payload") val payload: Any? = null, @JsonProperty("id", required = false) val id: String? = "")
-data class QueryPayload(@JsonProperty("variables") val variables: Map<String, Any>?, @JsonProperty("extensions") val extensions: Map<String, Any> = emptyMap(), @JsonProperty("operationName") val operationName: String?, @JsonProperty("query") val query: String)
